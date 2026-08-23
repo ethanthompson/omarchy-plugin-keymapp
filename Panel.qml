@@ -1,0 +1,494 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+
+// Bar widget for the ZSA Keymapp API. Shows whether Keymapp is running, the
+// connected keyboard's active layer, and a click-to-switch layer picker.
+//
+// Talks to Keymapp through the `kontroll` CLI (https://github.com/zsa/kontroll,
+// AUR: zsa-kontroll-bin), which speaks Keymapp's local gRPC API over its Unix
+// socket. There's no long-lived Quickshell service for Keymapp, so status is
+// polled on a timer that keeps running whether or not the popup is open, the
+// same way the bar icon needs to.
+//
+// The live API only ever reports the *active* layer as a bare index — it
+// doesn't expose how many layers exist or what they're named. Keymapp's own
+// UI gets that from its local cache instead: a compiled copy of your keymap
+// that it keeps in ~/.config/.keymapp/keymapp.sqlite3 (table `revision`,
+// one JSON blob per synced layout) so it can render offline. We read that
+// same file with the `sqlite3` CLI to recover real layer names and count.
+// If that file or CLI isn't available, layer names fall back to the manual
+// `layerCount`/`layerNames` settings.
+Panel {
+  id: root
+  moduleName: "ethan.keymapp"
+  ipcTarget: "ethan.keymapp"
+
+  property bool keymappRunning: false
+  property bool keyboardConnected: false
+  property string keyboardName: ""
+  property string firmwareVersion: ""
+  property int currentLayer: -1
+  property string lastError: ""
+  property int cursorLayer: 0
+  property bool cursorActive: false
+  property var discoveredLayerNames: []
+
+  readonly property int refreshIntervalSec: setting("refreshIntervalSec", 5)
+  readonly property int manualLayerCount: Math.max(1, setting("layerCount", 6))
+  readonly property string layerNamesRaw: setting("layerNames", "")
+  readonly property string keymappConfigDir: {
+    var xdg = Quickshell.env("XDG_CONFIG_HOME")
+    var base = xdg && xdg.length > 0 ? xdg : (Quickshell.env("HOME") + "/.config")
+    return base + "/.keymapp"
+  }
+  readonly property string keymappDbPath: keymappConfigDir + "/keymapp.sqlite3"
+
+  readonly property var manualLayerNames: layerNamesRaw.split(",").map(function(s) { return s.trim() }).filter(function(s) { return s !== "" })
+
+  // Manual names (if set) win outright; otherwise prefer whatever we read
+  // out of Keymapp's local keymap cache; otherwise fall back to bare numbers
+  // using the manual layer count.
+  readonly property var layerLabels: {
+    if (manualLayerNames.length > 0) {
+      var labels = []
+      for (var i = 0; i < manualLayerCount; i++) labels.push(manualLayerNames[i] || String(i))
+      return labels
+    }
+    if (discoveredLayerNames.length > 0) return discoveredLayerNames
+    var fallback = []
+    for (var j = 0; j < manualLayerCount; j++) fallback.push(String(j))
+    return fallback
+  }
+  readonly property int layerCount: layerLabels.length
+
+  readonly property string statusIcon: "⌨"
+  readonly property string barText: keyboardConnected && currentLayer >= 0
+    ? statusIcon + " " + currentLayer
+    : statusIcon
+
+  // configure.zsa.io URLs are keyed by model slug, not the "friendly_name"
+  // Keymapp reports (e.g. "Moonlander MK1"), so map known ZSA models to
+  // their slug. Unrecognized keyboards just don't get a configure link.
+  readonly property var keyboardSlugByMatch: ({
+    "moonlander": "moonlander",
+    "ergodox": "ergodox-ez",
+    "planck": "planck-ez",
+    "voyager": "voyager"
+  })
+  readonly property string keyboardSlug: {
+    var name = keyboardName.toLowerCase()
+    for (var key in keyboardSlugByMatch) {
+      if (name.indexOf(key) !== -1) return keyboardSlugByMatch[key]
+    }
+    return ""
+  }
+  // firmware_version from kontroll (e.g. "GL9jw/DzYVWZ") is already the
+  // exact <layoutId>/<revisionId> path segment configure.zsa.io expects.
+  readonly property string configureUrl: keyboardSlug !== "" && firmwareVersion !== ""
+    ? "https://configure.zsa.io/" + keyboardSlug + "/layouts/" + firmwareVersion + "/0"
+    : ""
+
+  function openConfigureUrl() {
+    if (configureUrl !== "") Qt.openUrlExternally(configureUrl)
+  }
+
+  function refresh() {
+    if (!statusProc.running) statusProc.running = true
+  }
+
+  function refreshLayerNames() {
+    if (!layerNamesProc.running) layerNamesProc.running = true
+  }
+
+  // `revision` can hold more than one synced keyboard's compiled layout.
+  // Best-effort match the connected keyboard's friendly name against each
+  // layout's geometry/title; fall back to the first row when nothing matches
+  // (the common single-keyboard case).
+  function parseLayerNames(raw) {
+    var rows
+    try {
+      rows = JSON.parse(raw)
+    } catch (e) {
+      return
+    }
+    if (!Array.isArray(rows) || rows.length === 0) return
+
+    var wanted = root.keyboardName.toLowerCase()
+    var best = null
+
+    for (var i = 0; i < rows.length; i++) {
+      var layout
+      try {
+        layout = JSON.parse(rows[i].data).layout
+      } catch (e) {
+        continue
+      }
+      if (!layout || !layout.revision || !Array.isArray(layout.revision.layers)) continue
+      if (best === null) best = layout
+
+      var geometry = String(layout.geometry || "").toLowerCase()
+      var title = String(layout.title || "").toLowerCase()
+      if (wanted !== "" && geometry !== "" && (wanted.indexOf(geometry) !== -1 || geometry.indexOf(wanted) !== -1 || wanted.indexOf(title) !== -1)) {
+        best = layout
+        break
+      }
+    }
+    if (!best) return
+
+    var layers = best.revision.layers.slice().sort(function(a, b) { return (a.position || 0) - (b.position || 0) })
+    root.discoveredLayerNames = layers.map(function(l, idx) {
+      return (l.title && String(l.title).length > 0) ? String(l.title) : String(idx)
+    })
+  }
+
+  function parseStatus(raw) {
+    var data
+    try {
+      data = JSON.parse(raw)
+    } catch (e) {
+      return false
+    }
+    keymappRunning = true
+    lastError = ""
+    if (data && data.keyboard) {
+      keyboardConnected = true
+      keyboardName = data.keyboard.friendly_name || ""
+      firmwareVersion = data.keyboard.firmware_version || ""
+      currentLayer = typeof data.keyboard.current_layer === "number" ? data.keyboard.current_layer : -1
+    } else {
+      keyboardConnected = false
+      keyboardName = ""
+      firmwareVersion = ""
+      currentLayer = -1
+      // `kontroll status` only reports whatever keyboard Keymapp already
+      // has connected — it doesn't establish a connection itself. A fresh
+      // Keymapp process (e.g. relaunched on login, kept hidden in a special
+      // workspace) starts with no keyboard connected until something asks
+      // it to, so nudge it here rather than leaving the widget stuck on
+      // "no keyboard" until someone opens Keymapp's window by hand.
+      attemptAutoConnect()
+    }
+    return true
+  }
+
+  function attemptAutoConnect() {
+    if (!connectAnyProc.running) connectAnyProc.running = true
+  }
+
+  function handleStatusFailure(stderrText) {
+    keymappRunning = false
+    keyboardConnected = false
+    keyboardName = ""
+    firmwareVersion = ""
+    currentLayer = -1
+    lastError = stderrText && stderrText.length > 0
+      ? stderrText
+      : "kontroll not found. Install it with: omarchy pkg aur add zsa-kontroll-bin"
+  }
+
+  function setLayer(index) {
+    if (setLayerProc.running || index < 0 || index >= layerCount) return
+    setLayerProc.command = ["kontroll", "set-layer", "-i", String(index)]
+    setLayerProc.running = true
+  }
+
+  function moveCursor(delta) {
+    if (layerCount <= 0) return
+    cursorActive = true
+    cursorLayer = (cursorLayer + delta + layerCount) % layerCount
+  }
+
+  onOpenedChanged: {
+    if (opened) {
+      refresh()
+      refreshLayerNames()
+      cursorLayer = currentLayer >= 0 ? currentLayer : 0
+      cursorActive = false
+    }
+  }
+
+  onKeyboardConnectedChanged: if (keyboardConnected) refreshLayerNames()
+
+  Component.onCompleted: refreshLayerNames()
+
+  visible: true
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  property string statusOut: ""
+  property string statusErr: ""
+  property string layerNamesOut: ""
+
+  // Fails harmlessly (non-zero exit) if a keyboard's already connected or
+  // none is plugged in, so it's safe to fire opportunistically whenever a
+  // status poll comes back with no keyboard.
+  Process {
+    id: connectAnyProc
+    command: ["kontroll", "connect-any"]
+    onExited: root.refresh()
+  }
+
+  Process {
+    id: statusProc
+    command: ["kontroll", "status", "--json"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.statusOut = text }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: root.statusErr = String(text || "").trim() }
+    onExited: function(exitCode) {
+      if (exitCode === 0 && root.parseStatus(root.statusOut)) return
+      root.handleStatusFailure(root.statusErr)
+    }
+  }
+
+  Process {
+    id: setLayerProc
+    onExited: root.refresh()
+  }
+
+  // Reads Keymapp's local compiled-keymap cache for layer names/count. Runs
+  // independently of the kontroll status poll: it's a large-ish read (a
+  // full compiled keymap per row) that only needs to happen when something
+  // might actually have changed, not every refresh tick.
+  Process {
+    id: layerNamesProc
+    command: ["sqlite3", "-readonly", "-json", root.keymappDbPath, "SELECT revisionId, data FROM revision;"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.layerNamesOut = text }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.parseLayerNames(root.layerNamesOut)
+    }
+  }
+
+  Timer {
+    interval: root.refreshIntervalSec * 1000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refresh()
+  }
+
+  // Slow safety-net re-read in case the keymap gets recompiled/re-synced
+  // mid-session without the keyboard ever disconnecting.
+  Timer {
+    interval: 5 * 60 * 1000
+    running: true
+    repeat: true
+    onTriggered: root.refreshLayerNames()
+  }
+
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    text: root.barText
+    dimmed: !root.keymappRunning
+    tooltipText: root.keymappRunning
+      ? (root.keyboardConnected
+        ? "Keymapp — " + root.keyboardName + " — layer " + root.currentLayer
+        : "Keymapp running, no keyboard connected")
+      : "Keymapp not running"
+    onPressed: function(b) { root.toggle() }
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(340))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      onMoveRequested: function(dx, dy) {
+        if (!root.cursorActive) { root.cursorActive = true; return }
+        if (dx !== 0) root.moveCursor(dx)
+        else if (dy !== 0) root.moveCursor(dy)
+      }
+      onActivateRequested: if (root.cursorActive) root.setLayer(root.cursorLayer)
+      onCloseRequested: root.close()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+
+      Column {
+        id: column
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        spacing: Style.space(14)
+
+        // ---------- Hero: icon · title/status · layer ----------
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroLayer.implicitHeight)
+
+          Text {
+            id: heroIcon
+            text: root.statusIcon
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.display
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Column {
+            id: heroLabels
+            anchors.left: heroIcon.right
+            anchors.leftMargin: Style.space(14)
+            anchors.right: heroLayer.left
+            anchors.rightMargin: Style.space(10)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(2)
+
+            Text {
+              text: "Keymapp"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              elide: Text.ElideRight
+              width: parent.width
+            }
+
+            Text {
+              text: !root.keymappRunning
+                ? "NOT RUNNING"
+                : (root.keyboardConnected ? root.keyboardName.toUpperCase() : "NO KEYBOARD")
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+              elide: Text.ElideRight
+              width: parent.width
+            }
+          }
+
+          Text {
+            id: heroLayer
+            text: root.keyboardConnected && root.currentLayer >= 0
+              ? String(root.currentLayer)
+              : "—"
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.displayLarge
+            font.bold: true
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+
+        PanelSeparator {
+          foreground: root.bar.foreground
+        }
+
+        // ---------- Layer picker ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+          visible: root.keymappRunning && root.keyboardConnected
+
+          PanelSectionHeader {
+            text: "LAYER"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          Flow {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: root.layerLabels
+              Button {
+                required property var modelData
+                required property int index
+                text: modelData
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+                bordered: true
+                active: root.currentLayer === index
+                hasCursor: root.cursorActive && root.cursorLayer === index
+                onClicked: root.setLayer(index)
+                onHovered: function(h) {
+                  if (h) {
+                    root.cursorActive = true
+                    root.cursorLayer = index
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // ---------- Not-connected / error messaging ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: !root.keymappRunning || !root.keyboardConnected
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: !root.keymappRunning
+              ? root.lastError
+              : "No keyboard connected in Keymapp. Plug in your keyboard and make sure Keymapp sees it."
+            color: root.bar.foreground
+            opacity: 0.7
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
+
+        // ---------- Firmware footer ----------
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(fwLabel.implicitHeight, fwValue.implicitHeight, fwLink.implicitHeight)
+          visible: root.keymappRunning && root.keyboardConnected && root.firmwareVersion !== ""
+
+          Text {
+            id: fwLabel
+            text: "Firmware"
+            color: root.bar.foreground
+            opacity: 0.6
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+          }
+          Text {
+            id: fwValue
+            text: root.firmwareVersion
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            anchors.left: fwLabel.right
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          PanelActionButton {
+            id: fwLink
+            visible: root.configureUrl !== ""
+            iconText: "↗"
+            tooltipText: "Open this layout in ZSA Configure"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            fontSize: Style.font.bodySmall
+            anchors.left: fwValue.right
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            onClicked: root.openConfigureUrl()
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "id": "ethan.keymapp",
+  "name": "Keymapp Layers",
+  "version": "1.0.0",
+  "author": "ethan",
+  "license": "MIT",
+  "description": "Shows whether ZSA Keymapp is running and the active keyboard layer (with real layer names, read from Keymapp's local keymap cache), and lets you switch layers on the connected keyboard.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Keymapp Layers",
+    "description": "ZSA Keymapp status, current layer, and layer switching via the Keymapp API (kontroll).",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 5,
+      "layerCount": 6,
+      "layerNames": ""
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "layerCount",
+        "type": "integer",
+        "label": "Fallback layer count",
+        "min": 1,
+        "max": 32,
+        "step": 1,
+        "defaultValue": 6,
+        "description": "Layer names/count are normally read straight from Keymapp's local keymap cache. This is only used as a fallback if that can't be read (sqlite3 missing, cache not found, etc)."
+      },
+      {
+        "key": "layerNames",
+        "type": "string",
+        "label": "Manual layer names (comma-separated, optional)",
+        "defaultValue": "",
+        "description": "e.g. \"Base, Nav, Sym, Num\". Overrides auto-detected names entirely when set. Leave blank to use the names from Keymapp (or plain numbers if those can't be read)."
+      }
+    ]
+  }
+}
