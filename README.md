@@ -8,6 +8,8 @@ layers directly from the bar — all without opening Keymapp itself.
 
 ## How it works
 
+<img width="404" height="319" alt="image" src="https://github.com/user-attachments/assets/04cab1b5-669c-4df5-93eb-7eef18b29650" />
+
 There's no long-lived Quickshell service for Keymapp, so this plugin talks to
 it directly through [`kontroll`](https://github.com/zsa/kontroll), a small CLI
 that speaks Keymapp's local API over its Unix socket. Status is polled on a
