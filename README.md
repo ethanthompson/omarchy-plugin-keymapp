@@ -26,6 +26,49 @@ The panel also shows a link to open your keyboard's current layout directly
 in [ZSA's Configure](https://configure.zsa.io/) tool, built from the
 connected keyboard's model and firmware version.
 
+## Keeping Keymapp out of the way
+
+`kontroll` (and so this widget) only works while the Keymapp app is actually
+running — its gRPC socket and local cache go away the moment you quit it.
+Hyprland has no real window minimization, but its *special workspaces* work
+well as a stand-in: launch Keymapp on login, assign its window to a hidden
+special workspace so it never shows up on a real one, and bind a key to pop
+it into view only when you actually need its UI (e.g. to edit a layout or
+check for firmware updates).
+
+Add something like this to your Hyprland config:
+
+```
+# Launch Keymapp on login, headless
+exec-once = uwsm-app -- keymapp
+
+# Keep its window off your regular workspaces
+windowrulev2 = workspace special:keymapp silent, class:^(keymapp)$
+
+# SUPER+CTRL+ALT+K toggles the Keymapp window visible/hidden
+bind = SUPER CTRL ALT, K, togglespecialworkspace, keymapp
+```
+
+If you're on Omarchy's Lua config format instead of raw `hyprland.conf`:
+
+```lua
+-- autostart.lua
+o.launch_on_start("keymapp")
+
+-- hyprland.lua (window rules)
+o.window("keymapp", { workspace = "special:keymapp silent" })
+
+-- bindings.lua
+o.bind("SUPER + CTRL + ALT + K", "Toggle Keymapp", hl.dsp.workspace.toggle_special("keymapp"))
+```
+
+With this in place, Keymapp is always running in the background — this
+widget stays live and `configure.zsa.io` links keep working — without ever
+cluttering your workspaces. Note that a freshly launched, still-hidden
+Keymapp instance hasn't connected to your keyboard yet on its own; that's
+why the widget's status poll opportunistically runs `kontroll connect-any`
+whenever it sees no keyboard connected.
+
 ## Requirements
 
 - [Keymapp](https://www.zsa.io/keymapp) installed and running
@@ -53,7 +96,10 @@ omarchy plugin add https://github.com/ethanthompson/omarchy-plugin-keymapp --ena
 Click the keyboard icon in the bar to open the panel. It shows:
 
 - Whether Keymapp is running and whether a keyboard is connected
-- The active layer, with a row of buttons to switch layers
+- The active layer, with a row of buttons to switch layers, and a ⟳ button
+  next to the layer list to force an immediate re-read of Keymapp's cache
+  (useful right after flashing new firmware, so you don't wait for the
+  periodic background refresh)
 - The connected keyboard's firmware version, with a link to open that exact
   layout in ZSA's Configure tool
 
