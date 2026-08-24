@@ -103,10 +103,13 @@ Panel {
     if (!layerNamesProc.running) layerNamesProc.running = true
   }
 
-  // `revision` can hold more than one synced keyboard's compiled layout.
-  // Best-effort match the connected keyboard's friendly name against each
-  // layout's geometry/title; fall back to the first row when nothing matches
-  // (the common single-keyboard case).
+  // `revision` can hold more than one synced revision for the same keyboard —
+  // e.g. right after flashing new firmware, Keymapp syncs the new compiled
+  // layout down but leaves the previous revision's row in place. Best-effort
+  // match the connected keyboard's friendly name against each layout's
+  // geometry/title, and among matches (or among all rows if nothing matches)
+  // prefer the one with the newest revision.createdAt, since row order isn't
+  // guaranteed to reflect sync recency.
   function parseLayerNames(raw) {
     var rows
     try {
@@ -118,6 +121,8 @@ Panel {
 
     var wanted = root.keyboardName.toLowerCase()
     var best = null
+    var bestMatched = false
+    var bestCreatedAt = -1
 
     for (var i = 0; i < rows.length; i++) {
       var layout
@@ -127,13 +132,18 @@ Panel {
         continue
       }
       if (!layout || !layout.revision || !Array.isArray(layout.revision.layers)) continue
-      if (best === null) best = layout
 
       var geometry = String(layout.geometry || "").toLowerCase()
       var title = String(layout.title || "").toLowerCase()
-      if (wanted !== "" && geometry !== "" && (wanted.indexOf(geometry) !== -1 || geometry.indexOf(wanted) !== -1 || wanted.indexOf(title) !== -1)) {
+      var matched = wanted !== "" && geometry !== "" && (wanted.indexOf(geometry) !== -1 || geometry.indexOf(wanted) !== -1 || wanted.indexOf(title) !== -1)
+
+      var createdAt = Date.parse(layout.revision.createdAt || "")
+      if (isNaN(createdAt)) createdAt = 0
+
+      if (best === null || (matched && !bestMatched) || (matched === bestMatched && createdAt > bestCreatedAt)) {
         best = layout
-        break
+        bestMatched = matched
+        bestCreatedAt = createdAt
       }
     }
     if (!best) return
@@ -392,10 +402,33 @@ Panel {
           spacing: Style.space(10)
           visible: root.keymappRunning && root.keyboardConnected
 
-          PanelSectionHeader {
-            text: "LAYER"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(layerHeader.implicitHeight, refreshLayersButton.implicitHeight)
+
+            PanelSectionHeader {
+              id: layerHeader
+              text: "LAYER"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            PanelActionButton {
+              id: refreshLayersButton
+              iconText: "⟳"
+              tooltipText: "Re-read layer names from Keymapp (e.g. after flashing new firmware)"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: {
+                root.refresh()
+                root.refreshLayerNames()
+              }
+            }
           }
 
           Flow {
