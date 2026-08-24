@@ -71,7 +71,11 @@ whenever it sees no keyboard connected.
 
 ## Requirements
 
-- [Keymapp](https://www.zsa.io/keymapp) installed and running
+- [Keymapp](https://www.zsa.io/keymapp) v1.3.2 or newer, installed and running
+- Keymapp's local API enabled: **Keymapp → Settings → Enable API**. This is
+  off by default — `kontroll` (and so this widget) can't connect at all
+  until you turn it on once. If the widget shows "Keymapp not running" even
+  though Keymapp is open, this is the first thing to check.
 - [`kontroll`](https://github.com/zsa/kontroll) — install from the AUR:
   ```
   omarchy pkg aur add zsa-kontroll-bin
