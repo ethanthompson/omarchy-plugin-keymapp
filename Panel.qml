@@ -49,9 +49,15 @@ Panel {
   // Guards against a runaway or malicious `kontroll status` response and
   // against keymapp.sqlite3 holding an oversized/adversarial cache (it's
   // just a local file, but nothing stops another process — or a corrupted
-  // sync — from bloating it). Rather than trust StdioCollector to hand back
-  // an arbitrarily large string, cap what we're willing to parse and how
-  // much of any individual field we're willing to render.
+  // sync — from bloating it). StdioCollector keeps appending to its internal
+  // buffer for as long as the process keeps writing, regardless of
+  // waitForEnd — waitForEnd only controls when `text`/`data` are exposed to
+  // QML, not how much gets buffered internally. So every collector below is
+  // waitForEnd: false, and these caps are enforced live from onDataChanged
+  // by killing the offending process the moment its combined output crosses
+  // the limit (see boundedAppend below), rather than only checking the
+  // length of whatever StdioCollector eventually hands back once the
+  // stream ends — by which point the damage is already done.
   readonly property int maxStatusOutputBytes: 262144
   readonly property int maxKeymapCacheBytes: 8 * 1024 * 1024
   readonly property int maxLayersParsed: 64
@@ -61,6 +67,20 @@ Panel {
     s = String(s || "")
     var limit = max || root.maxFieldLength
     return s.length > limit ? s.slice(0, limit) : s
+  }
+
+  // Called from a StdioCollector's onDataChanged as `text` grows. Kills
+  // `proc` the instant accumulated output crosses `maxBytes` so the
+  // collector stops appending to its buffer, then returns the (possibly
+  // truncated) text to store. Truncation makes the JSON invalid, which
+  // parseStatus()/parseLayerNames() already reject via their own try/catch —
+  // and killing the process also gives it a non-zero exit code, so a
+  // truncated `kontroll status` read is treated as a status failure rather
+  // than silently parsed.
+  function boundedAppend(proc, text, maxBytes) {
+    if (text.length <= maxBytes) return text
+    if (proc.running) proc.running = false
+    return text.slice(0, maxBytes)
   }
 
   readonly property var manualLayerNames: layerNamesRaw.split(",").map(function(s) { return s.trim() }).filter(function(s) { return s !== "" })
@@ -268,11 +288,11 @@ Panel {
   Process {
     id: statusProc
     command: ["kontroll", "status", "--json"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.statusOut = text }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: root.statusErr = root.clampField(String(text || "").trim(), 500) }
+    stdout: StdioCollector { waitForEnd: false; onDataChanged: root.statusOut = root.boundedAppend(statusProc, text, root.maxStatusOutputBytes) }
+    stderr: StdioCollector { waitForEnd: false; onDataChanged: root.statusErr = root.boundedAppend(statusProc, text, 500) }
     onExited: function(exitCode) {
       if (exitCode === 0 && root.parseStatus(root.statusOut)) return
-      root.handleStatusFailure(root.statusErr)
+      root.handleStatusFailure(root.statusErr.trim())
     }
   }
 
@@ -288,7 +308,7 @@ Panel {
   Process {
     id: layerNamesProc
     command: ["sqlite3", "-readonly", "-json", root.keymappDbPath, "SELECT revisionId, data FROM revision ORDER BY revisionId DESC LIMIT 25;"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.layerNamesOut = text }
+    stdout: StdioCollector { waitForEnd: false; onDataChanged: root.layerNamesOut = root.boundedAppend(layerNamesProc, text, root.maxKeymapCacheBytes) }
     onExited: function(exitCode) {
       if (exitCode === 0) root.parseLayerNames(root.layerNamesOut)
     }
