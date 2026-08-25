@@ -345,7 +345,19 @@ Panel {
 
   Process {
     id: setLayerProc
-    onExited: root.refresh()
+    // `kontroll set-layer` exits as soon as its request lands, which can
+    // beat Keymapp's own state update — a status refresh fired immediately
+    // on exit can still read back the *previous* layer, briefly clobbering
+    // the optimistic update in setLayer() with stale data before the next
+    // poll corrects it again. Give Keymapp a moment to actually commit the
+    // switch before confirming it.
+    onExited: postSetLayerRefreshTimer.restart()
+  }
+
+  Timer {
+    id: postSetLayerRefreshTimer
+    interval: 300
+    onTriggered: root.refresh()
   }
 
   // Reads Keymapp's local compiled-keymap cache for layer names/count. Runs
