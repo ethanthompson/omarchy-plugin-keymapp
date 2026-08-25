@@ -286,6 +286,12 @@ Panel {
 
   function setLayer(index) {
     if (setLayerProc.running || index < 0 || index >= layerCount) return
+    // Update optimistically so the bar/panel reflect the switch the instant
+    // it's clicked, rather than waiting on set-layer's process to exit and
+    // a full status re-poll to come back. onExited below still runs a real
+    // refresh() regardless of outcome, so a failed/rejected set-layer
+    // self-corrects back to the true layer within that one status poll.
+    currentLayer = index
     setLayerProc.command = ["kontroll", "set-layer", "-i", String(index)]
     setLayerProc.running = true
   }
