@@ -46,6 +46,23 @@ Panel {
   }
   readonly property string keymappDbPath: keymappConfigDir + "/keymapp.sqlite3"
 
+  // Guards against a runaway or malicious `kontroll status` response and
+  // against keymapp.sqlite3 holding an oversized/adversarial cache (it's
+  // just a local file, but nothing stops another process — or a corrupted
+  // sync — from bloating it). Rather than trust StdioCollector to hand back
+  // an arbitrarily large string, cap what we're willing to parse and how
+  // much of any individual field we're willing to render.
+  readonly property int maxStatusOutputBytes: 262144
+  readonly property int maxKeymapCacheBytes: 8 * 1024 * 1024
+  readonly property int maxLayersParsed: 64
+  readonly property int maxFieldLength: 200
+
+  function clampField(s, max) {
+    s = String(s || "")
+    var limit = max || root.maxFieldLength
+    return s.length > limit ? s.slice(0, limit) : s
+  }
+
   readonly property var manualLayerNames: layerNamesRaw.split(",").map(function(s) { return s.trim() }).filter(function(s) { return s !== "" })
 
   // Manual names (if set) win outright; otherwise prefer whatever we read
@@ -111,6 +128,10 @@ Panel {
   // prefer the one with the newest revision.createdAt, since row order isn't
   // guaranteed to reflect sync recency.
   function parseLayerNames(raw) {
+    // Bail before JSON.parse ever sees it: a bloated cache (LIMIT above
+    // still caps row count, but a single row's compiled keymap could still
+    // be huge) shouldn't get parsed or held onto.
+    if (String(raw || "").length > root.maxKeymapCacheBytes) return
     var rows
     try {
       rows = JSON.parse(raw)
@@ -148,13 +169,16 @@ Panel {
     }
     if (!best) return
 
-    var layers = best.revision.layers.slice().sort(function(a, b) { return (a.position || 0) - (b.position || 0) })
+    var layers = best.revision.layers.slice()
+      .sort(function(a, b) { return (a.position || 0) - (b.position || 0) })
+      .slice(0, root.maxLayersParsed)
     root.discoveredLayerNames = layers.map(function(l, idx) {
-      return (l.title && String(l.title).length > 0) ? String(l.title) : String(idx)
+      return (l.title && String(l.title).length > 0) ? root.clampField(l.title) : String(idx)
     })
   }
 
   function parseStatus(raw) {
+    if (String(raw || "").length > root.maxStatusOutputBytes) return false
     var data
     try {
       data = JSON.parse(raw)
@@ -165,8 +189,8 @@ Panel {
     lastError = ""
     if (data && data.keyboard) {
       keyboardConnected = true
-      keyboardName = data.keyboard.friendly_name || ""
-      firmwareVersion = data.keyboard.firmware_version || ""
+      keyboardName = root.clampField(data.keyboard.friendly_name)
+      firmwareVersion = root.clampField(data.keyboard.firmware_version)
       currentLayer = typeof data.keyboard.current_layer === "number" ? data.keyboard.current_layer : -1
     } else {
       keyboardConnected = false
@@ -245,7 +269,7 @@ Panel {
     id: statusProc
     command: ["kontroll", "status", "--json"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.statusOut = text }
-    stderr: StdioCollector { waitForEnd: true; onStreamFinished: root.statusErr = String(text || "").trim() }
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: root.statusErr = root.clampField(String(text || "").trim(), 500) }
     onExited: function(exitCode) {
       if (exitCode === 0 && root.parseStatus(root.statusOut)) return
       root.handleStatusFailure(root.statusErr)
@@ -263,7 +287,7 @@ Panel {
   // might actually have changed, not every refresh tick.
   Process {
     id: layerNamesProc
-    command: ["sqlite3", "-readonly", "-json", root.keymappDbPath, "SELECT revisionId, data FROM revision;"]
+    command: ["sqlite3", "-readonly", "-json", root.keymappDbPath, "SELECT revisionId, data FROM revision ORDER BY revisionId DESC LIMIT 25;"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.layerNamesOut = text }
     onExited: function(exitCode) {
       if (exitCode === 0) root.parseLayerNames(root.layerNamesOut)
@@ -368,6 +392,7 @@ Panel {
               text: !root.keymappRunning
                 ? "NOT RUNNING"
                 : (root.keyboardConnected ? root.keyboardName.toUpperCase() : "NO KEYBOARD")
+              textFormat: Text.PlainText
               color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
@@ -473,6 +498,7 @@ Panel {
             text: !root.keymappRunning
               ? root.lastError
               : "No keyboard connected in Keymapp. Plug in your keyboard and make sure Keymapp sees it."
+            textFormat: Text.PlainText
             color: root.bar.foreground
             opacity: 0.7
             font.family: root.bar.fontFamily
@@ -499,6 +525,7 @@ Panel {
           Text {
             id: fwValue
             text: root.firmwareVersion
+            textFormat: Text.PlainText
             color: root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
