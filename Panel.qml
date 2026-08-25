@@ -59,6 +59,12 @@ Panel {
   // the limit (see boundedAppend below), rather than only checking the
   // length of whatever StdioCollector eventually hands back once the
   // stream ends — by which point the damage is already done.
+  //
+  // These are JS string length (UTF-16 code unit) caps, not a count of the
+  // process's original output bytes — but since Qt/JS strings are always
+  // stored as UTF-16 internally, that's exactly what bounds the actual
+  // in-memory footprint we're trying to cap, regardless of how the source
+  // text was encoded on the wire.
   readonly property int maxStatusOutputBytes: 262144
   readonly property int maxKeymapCacheBytes: 8 * 1024 * 1024
   readonly property int maxLayersParsed: 64
@@ -88,9 +94,17 @@ Panel {
   // and killing the process also gives it a non-zero exit code, so a
   // truncated `kontroll status` read is treated as a status failure rather
   // than silently parsed.
+  //
+  // running = false only sends SIGTERM (Process::terminate()), which a
+  // hostile process — the exact threat this guards against — can trap or
+  // ignore and keep writing. Follow up with signal(9) (SIGKILL) directly so
+  // the process actually stops regardless of its own signal handling.
   function boundedAppend(proc, text, maxBytes) {
     if (text.length <= maxBytes) return text
-    if (proc.running) proc.running = false
+    if (proc.running) {
+      proc.running = false
+      proc.signal(9)
+    }
     return text.slice(0, maxBytes)
   }
 
