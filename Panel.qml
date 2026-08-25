@@ -35,6 +35,7 @@ Panel {
   property int cursorLayer: 0
   property bool cursorActive: false
   property var discoveredLayerNames: []
+  property bool autoConnectAttempted: false
 
   readonly property int refreshIntervalSec: setting("refreshIntervalSec", 5)
   readonly property int manualLayerCount: Math.max(1, setting("layerCount", 6))
@@ -67,6 +68,16 @@ Panel {
     s = String(s || "")
     var limit = max || root.maxFieldLength
     return s.length > limit ? s.slice(0, limit) : s
+  }
+
+  // The panel's own Text elements pin textFormat to Text.PlainText, but the
+  // bar's shared tooltip label doesn't — it defaults to Text.AutoText and
+  // will render anything that looks like markup as rich text. Strip the
+  // characters that make Qt consider a string "rich text" before an
+  // untrusted field (e.g. keyboardName, sourced from `kontroll status`)
+  // reaches tooltipText.
+  function plainTooltip(s) {
+    return String(s || "").replace(/[<>]/g, "")
   }
 
   // Called from a StdioCollector's onDataChanged as `text` grows. Kills
@@ -212,6 +223,9 @@ Panel {
       keyboardName = root.clampField(data.keyboard.friendly_name)
       firmwareVersion = root.clampField(data.keyboard.firmware_version)
       currentLayer = typeof data.keyboard.current_layer === "number" ? data.keyboard.current_layer : -1
+      // A keyboard is connected now, so a future disconnect deserves its
+      // own fresh nudge.
+      autoConnectAttempted = false
     } else {
       keyboardConnected = false
       keyboardName = ""
@@ -223,7 +237,17 @@ Panel {
       // workspace) starts with no keyboard connected until something asks
       // it to, so nudge it here rather than leaving the widget stuck on
       // "no keyboard" until someone opens Keymapp's window by hand.
-      attemptAutoConnect()
+      //
+      // Only do this once per "no keyboard" streak: connectAnyProc's
+      // onExited re-triggers a status refresh immediately (not on the
+      // timer), and with no keyboard actually plugged in — a common,
+      // long-lived state — re-nudging on every poll turned this into an
+      // unthrottled loop that kept spawning kontroll processes back-to-back
+      // forever.
+      if (!autoConnectAttempted) {
+        autoConnectAttempted = true
+        attemptAutoConnect()
+      }
     }
     return true
   }
@@ -241,6 +265,9 @@ Panel {
     lastError = stderrText && stderrText.length > 0
       ? stderrText
       : "kontroll not found. Install it with: omarchy pkg aur add zsa-kontroll-bin"
+    // Keymapp itself isn't running (or kontroll can't reach it); reset so
+    // it gets a fresh auto-connect nudge once it comes back up.
+    autoConnectAttempted = false
   }
 
   function setLayer(index) {
@@ -339,7 +366,7 @@ Panel {
     dimmed: !root.keymappRunning
     tooltipText: root.keymappRunning
       ? (root.keyboardConnected
-        ? "Keymapp — " + root.keyboardName + " — layer " + root.currentLayer
+        ? "Keymapp — " + root.plainTooltip(root.keyboardName) + " — layer " + root.currentLayer
         : "Keymapp running, no keyboard connected")
       : "Keymapp not running"
     onPressed: function(b) { root.toggle() }
