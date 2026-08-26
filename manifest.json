@@ -7,10 +7,12 @@
   "license": "MIT",
   "description": "Shows whether ZSA Keymapp is running and the active keyboard layer (with real layer names, read from Keymapp's local keymap cache), and lets you switch layers on the connected keyboard.",
   "kinds": [
-    "bar-widget"
+    "bar-widget",
+    "overlay"
   ],
   "entryPoints": {
-    "barWidget": "Panel.qml"
+    "barWidget": "Panel.qml",
+    "overlay": "Settings.qml"
   },
   "barWidget": {
     "displayName": "Keymapp Layers",

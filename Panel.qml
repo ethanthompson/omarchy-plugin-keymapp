@@ -157,6 +157,18 @@ Panel {
     if (configureUrl !== "") Qt.openUrlExternally(configureUrl)
   }
 
+  // Settings (currently just the polling interval) live in a separate
+  // overlay plugin surface — Settings.qml — summoned through the shell the
+  // same way the Home Assistant plugin's settings screen is, rather than
+  // shown inline in this popup. The current settings ride along as the
+  // payload so the overlay can edit a full copy without needing a live
+  // reference back to this widget instance.
+  function openSettings() {
+    if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
+    close()
+    bar.shell.summon(root.moduleName, JSON.stringify(root.settings || {}))
+  }
+
   function refresh() {
     if (!statusProc.running) statusProc.running = true
   }
@@ -425,6 +437,7 @@ Panel {
       onActivateRequested: if (root.cursorActive) root.setLayer(root.cursorLayer)
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTextKey: function(t) { if (t === "s" || t === "S") root.openSettings() }
 
       Column {
         id: column
@@ -433,10 +446,10 @@ Panel {
         anchors.top: parent.top
         spacing: Style.space(14)
 
-        // ---------- Hero: icon · title/status · layer ----------
+        // ---------- Hero: icon · title/status · layer · settings ----------
         Item {
           width: parent.width
-          implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroLayer.implicitHeight)
+          implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroRight.implicitHeight)
 
           Text {
             id: heroIcon
@@ -452,7 +465,7 @@ Panel {
             id: heroLabels
             anchors.left: heroIcon.right
             anchors.leftMargin: Style.space(14)
-            anchors.right: heroLayer.left
+            anchors.right: heroRight.left
             anchors.rightMargin: Style.space(10)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
@@ -482,17 +495,34 @@ Panel {
             }
           }
 
-          Text {
-            id: heroLayer
-            text: root.keyboardConnected && root.currentLayer >= 0
-              ? String(root.currentLayer)
-              : "—"
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.displayLarge
-            font.bold: true
+          Row {
+            id: heroRight
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(10)
+
+            Text {
+              id: heroLayer
+              text: root.keyboardConnected && root.currentLayer >= 0
+                ? String(root.currentLayer)
+                : "—"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.displayLarge
+              font.bold: true
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            PanelActionButton {
+              id: settingsButton
+              iconText: "󰒓"
+              tooltipText: "Settings"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.bodySmall
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: root.openSettings()
+            }
           }
         }
 

@@ -106,9 +106,14 @@ Click the keyboard icon in the bar to open the panel. It shows:
   periodic background refresh)
 - The connected keyboard's firmware version, with a link to open that exact
   layout in ZSA's Configure tool
+- A ⚙ settings button next to the layer number that opens a settings dialog
+  (press `s` as a shortcut) with a slider for the polling interval. Changes
+  are only written back to the plugin's config when you click **Save**;
+  **Cancel**, Escape, or clicking outside the dialog discards them
 
 Keyboard navigation: arrow keys move the layer cursor, Enter/Space activates
-the highlighted layer, Escape closes the panel.
+the highlighted layer, Escape closes the panel (or the settings dialog, if
+that's open).
 
 ## Configuration
 
